@@ -1,0 +1,9 @@
+data/*
+!data/.gitkeep
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Development session notes — personal, not for publication
+context/
