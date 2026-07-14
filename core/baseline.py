@@ -355,8 +355,27 @@ class BaselineStore:
                 self._first_seen_ns = timestamp_ns
 
     def update_direct_observation(self, days: float) -> None:
+        """
+        Sets direct_observation_days to an absolute value. Used by tests
+        to set up specific confidence scenarios. For real accumulation
+        during normal operation, use add_direct_observation() instead —
+        that one is additive across restarts, this one is not.
+        """
         with self._lock:
             self._direct_observation_days = days
+            self._save()
+
+    def add_direct_observation(self, days_increment: float) -> None:
+        """
+        Adds days_increment to the existing cumulative total, rather
+        than replacing it. This is what makes direct-observation time
+        survive restarts correctly — each flush reports only the time
+        elapsed since the LAST flush (see BaselineCollector.flush()),
+        and that increment accumulates on top of whatever was already
+        persisted from prior sessions.
+        """
+        with self._lock:
+            self._direct_observation_days += days_increment
             self._save()
 
     def set_seed_days(self, days: float) -> None:
@@ -501,6 +520,11 @@ class BaselineCollector:
         self._current_hour_slot: str = ""
         self._stop_event = threading.Event()
         self._start_ns   = time.time_ns()
+        # Tracks time since the LAST flush, not since process start —
+        # this is what makes direct-observation time additive across
+        # restarts instead of resetting to a tiny number every time
+        # precog.py starts fresh.
+        self._last_flush_ns = time.time_ns()
 
     def process(self, entry: LogEntry) -> None:
         """
@@ -539,10 +563,15 @@ class BaselineCollector:
                 self._flush_counts(self._current_hour_slot)
                 self._counts = {}
 
-        elapsed_days = (
-            (time.time_ns() - self._start_ns) / 1_000_000_000 / 86400
+        now_ns = time.time_ns()
+        # Time since the LAST flush (not since process start) — this
+        # increment gets ADDED to the persisted cumulative total in
+        # BaselineStore, so restarting precog.py doesn't reset progress.
+        elapsed_days_increment = (
+            (now_ns - self._last_flush_ns) / 1_000_000_000 / 86400
         )
-        self.store.update_direct_observation(elapsed_days)
+        self._last_flush_ns = now_ns
+        self.store.add_direct_observation(elapsed_days_increment)
 
     def _flush_counts(self, slot_key: str) -> None:
         for source, count in self._counts.items():
