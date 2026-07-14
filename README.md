@@ -93,6 +93,30 @@ See config/precog.conf for the full set of tunable settings:
   each alert tier fires
 - [keywords] — which terms are tracked, and which are severe enough
   to trigger an immediate Triage alert
+- [keyword_exclusions] — optional false-positive guards. If a keyword
+  matches AND its configured exclusion phrase is also present in the
+  same line, the match is skipped entirely. Useful for keywords that
+  also show up in harmless boilerplate — for example, "timeout" shows
+  up in NetworkManager's normal status messages ("beginning transaction
+  (timeout in 45 seconds)"), which describe a time budget, not an
+  actual failure. Add, remove, or adjust these to match what turns out
+  to be noisy on your own system.
+- [noisy_keywords] — optional per-keyword override for keywords that
+  are individually meaningful but tend to recur frequently as routine
+  noise. Format: `keyword = required_count, window_seconds`. Instead
+  of the standard Pattern Watch threshold (3 of 5 within 10 minutes),
+  a keyword listed here needs its own configured count within its own
+  configured window before it fires — for example, requiring 10 hits
+  within an hour instead of 3 within 10 minutes. Fully adjustable to
+  whatever pattern length makes sense for what you're trying to catch.
+- [noisy_keywords] — optional per-keyword override for keywords that
+  are individually meaningful but tend to recur frequently as routine
+  noise. Format: `keyword = required_count, window_seconds`. Instead
+  of the standard Pattern Watch threshold (3 of 5 within 10 minutes),
+  a keyword listed here needs its own configured count within its own
+  configured window before it fires — for example, requiring 10 hits
+  within an hour instead of 3 within 10 minutes. Fully adjustable to
+  whatever pattern length makes sense for what you're trying to catch.
 - [colors] — terminal color scheme, including accessibility palettes
 - [retention] — how long flagged entries stay in the live log before
   archiving

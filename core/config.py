@@ -60,6 +60,8 @@ class PrecogConfig:
         self.keywords = self._load_keywords(parser)
         self.colors = self._load_colors(parser)
         self.retention = self._load_retention(parser)
+        self.keyword_exclusions = self._load_keyword_exclusions(parser)
+        self.noisy_keywords = self._load_noisy_keywords(parser)
 
     # ------------------------------------------------------------------
     def _load_thresholds(self, parser):
@@ -174,6 +176,54 @@ class PrecogConfig:
                 f"[retention] flagged_log_cutoff_days must be an integer, got: {raw!r}"
             )
         return {"flagged_log_cutoff_days": value}
+
+    # ------------------------------------------------------------------
+    def _load_keyword_exclusions(self, parser):
+        """
+        Optional section — falls back to an empty dict if missing.
+        Maps a keyword to a phrase that, if present in the same log
+        line, means the match should be skipped (a false-positive
+        guard for keywords that also appear in harmless boilerplate).
+        """
+        if "keyword_exclusions" not in parser:
+            return {}
+
+        section = parser["keyword_exclusions"]
+        result = {}
+        for key in section:
+            result[key.strip().lower()] = section[key].strip().lower()
+        return result
+
+    # ------------------------------------------------------------------
+    def _load_noisy_keywords(self, parser):
+        """
+        Optional section — falls back to an empty dict if missing.
+        Maps a keyword to its own (required_count, window_seconds) pair,
+        overriding the standard Pattern Watch threshold for that keyword
+        specifically. Format in precog.conf: keyword = count, window
+        """
+        if "noisy_keywords" not in parser:
+            return {}
+
+        section = parser["noisy_keywords"]
+        result = {}
+        for key in section:
+            raw = section[key].strip()
+            parts = [p.strip() for p in raw.split(",")]
+            if len(parts) != 2:
+                raise ConfigError(
+                    f"[noisy_keywords] {key} must be 'count, window_seconds', "
+                    f"got: {raw!r}"
+                )
+            try:
+                count = int(parts[0])
+                window = int(parts[1])
+            except ValueError:
+                raise ConfigError(
+                    f"[noisy_keywords] {key} values must be integers, got: {raw!r}"
+                )
+            result[key.strip().lower()] = (count, window)
+        return result
 
     # ------------------------------------------------------------------
     def resolve_color(self, category):

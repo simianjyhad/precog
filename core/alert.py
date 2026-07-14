@@ -306,6 +306,7 @@ class AlertTracker:
         alert_level: AlertLevel,
         pattern_key: str,
         note: str = None,
+        custom_threshold: AlertThreshold = None,
     ) -> Optional[FlaggedEntry]:
         """
         Evaluate a log entry against the threshold for alert_level.
@@ -330,10 +331,13 @@ class AlertTracker:
             if dedup_key in self._flagged_keys:
                 return None
 
-            # Get or create the PatternWindow for this key + tier combination
+            # Get or create the PatternWindow for this key + tier combination.
+            # custom_threshold (if given) overrides the standard shared
+            # threshold for this alert_level — used for "noisy" keywords
+            # that need their own, usually much stricter, count/window.
             if alert_level not in self._windows[pattern_key]:
                 self._windows[pattern_key][alert_level] = PatternWindow(
-                    self.thresholds[alert_level]
+                    custom_threshold or self.thresholds[alert_level]
                 )
 
             window = self._windows[pattern_key][alert_level]

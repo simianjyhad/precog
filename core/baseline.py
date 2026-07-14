@@ -200,10 +200,12 @@ class BaselineConfig:
         user_keywords: list[str] = None,
         sensitivity: float = 2.0,
         base_keywords: list[str] = None,
+        keyword_exclusions: dict = None,
     ):
         self.power_mode    = power_mode
         self.user_keywords = [k.lower() for k in (user_keywords or [])]
         self.sensitivity   = sensitivity
+        self.keyword_exclusions = keyword_exclusions or {}
         self.base_keywords = (
             [k.lower() for k in base_keywords]
             if base_keywords is not None
@@ -216,6 +218,19 @@ class BaselineConfig:
         if self.power_mode and self.user_keywords:
             keywords += self.user_keywords
         return list(dict.fromkeys(keywords))
+
+    def is_excluded(self, keyword: str, raw_lower: str) -> bool:
+        """
+        Returns True if this keyword match should be SKIPPED because
+        the line also contains that keyword's configured exclusion
+        phrase (a false-positive guard — e.g. "timeout" appearing in
+        harmless boilerplate rather than describing an actual failure).
+        Keywords with no configured exclusion are never excluded.
+        """
+        exclusion_phrase = self.keyword_exclusions.get(keyword)
+        if exclusion_phrase is None:
+            return False
+        return exclusion_phrase in raw_lower
 
     def storage_estimate(self, source_count: int) -> str:
         buckets_per_source = 168
@@ -500,7 +515,7 @@ class BaselineCollector:
 
         # Keyword scan
         for keyword in self.store.config.active_keywords:
-            if keyword in raw_lower:
+            if keyword in raw_lower and not self.store.config.is_excluded(keyword, raw_lower):
                 self.store.record_keyword_hit(
                     entry.source, keyword, entry.timestamp_ns
                 )

@@ -37,7 +37,7 @@ from core.rolling_log import RollingLog, WatcherManager, LogEntry
 from core.baseline import (
     BaselineStore, BaselineCollector, BaselineConfig, JournalSeeder
 )
-from core.alert import AlertTracker, AlertLevel, thresholds_from_config
+from core.alert import AlertTracker, AlertLevel, AlertThreshold, thresholds_from_config
 from core.colors import ColorScheme
 from core.config import PrecogConfig, ConfigError
 
@@ -79,6 +79,7 @@ class AlertBridge:
         tracker: AlertTracker,
         colors: ColorScheme = None,
         critical_keywords: set = None,
+        noisy_keywords: dict = None,
     ):
         self.tracker = tracker
         self.colors = colors or ColorScheme()
@@ -87,6 +88,11 @@ class AlertBridge:
         self.critical_keywords = (
             critical_keywords if critical_keywords is not None else CRITICAL_KEYWORDS
         )
+        # keyword -> (required_count, window_seconds). Keywords here get
+        # their own stricter threshold instead of the standard Pattern
+        # Watch tier (3 of 5 within 10 minutes) — for things that are
+        # individually meaningful but tend to recur as routine noise.
+        self.noisy_keywords = noisy_keywords or {}
 
     def consider(self, entry: LogEntry, keyword: str) -> None:
         """
@@ -94,14 +100,25 @@ class AlertBridge:
         """
         pattern_key = f"{entry.source}:{keyword}"
 
+        custom_threshold = None
+
         if keyword in self.critical_keywords:
             level = AlertLevel.TRIAGE
             note = f"Critical keyword '{keyword}' detected"
+        elif keyword in self.noisy_keywords:
+            level = AlertLevel.PATTERN_WATCH
+            count, window = self.noisy_keywords[keyword]
+            note = f"Noisy keyword '{keyword}' recurring ({count} within {window}s)"
+            custom_threshold = AlertThreshold(
+                required_count=count, total_samples=count, window_seconds=window
+            )
         else:
             level = AlertLevel.PATTERN_WATCH
             note = f"Keyword '{keyword}' recurring"
 
-        flagged = self.tracker.evaluate(entry, level, pattern_key, note=note)
+        flagged = self.tracker.evaluate(
+            entry, level, pattern_key, note=note, custom_threshold=custom_threshold
+        )
         if flagged:
             line = (f"[precog] ALERT ({level.name}): {entry.source} — "
                      f"{entry.raw[:80]}")
@@ -136,8 +153,13 @@ class Precog:
             print(f"[precog] WARNING: could not load {config_path}: {e}")
             print("[precog] Falling back to built-in defaults.")
 
+        keyword_exclusions = (
+            self.config.keyword_exclusions if self.config is not None else {}
+        )
         self.baseline_config = BaselineConfig(
-            power_mode=False, base_keywords=base_keywords
+            power_mode=False,
+            base_keywords=base_keywords,
+            keyword_exclusions=keyword_exclusions,
         )
         self.baseline_store  = BaselineStore(config=self.baseline_config)
         self.collector        = BaselineCollector(self.baseline_store)
@@ -145,8 +167,13 @@ class Precog:
         self.alert_tracker    = AlertTracker(
             thresholds=thresholds, data_dir=Path("/var/lib/precog")
         )
+        noisy_keywords = (
+            self.config.noisy_keywords if self.config is not None else {}
+        )
         self.alert_bridge     = AlertBridge(
-            self.alert_tracker, critical_keywords=critical_keywords
+            self.alert_tracker,
+            critical_keywords=critical_keywords,
+            noisy_keywords=noisy_keywords,
         )
         self.watcher_manager  = WatcherManager(self.rolling_log)
 
@@ -194,7 +221,7 @@ class Precog:
         raw_lower = entry.raw.lower()
         matched_keywords = [
             kw for kw in self.baseline_config.active_keywords
-            if kw in raw_lower
+            if kw in raw_lower and not self.baseline_config.is_excluded(kw, raw_lower)
         ]
 
         self.collector.process(entry)
