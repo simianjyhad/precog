@@ -116,7 +116,6 @@ if __name__ == "__main__":
     print("=" * 40)
     check_root()
     username, uid, gid = get_real_user()
-    username, uid, gid = get_real_user()
     PROJECT_DATA_DIR = Path(pwd.getpwnam(username).pw_dir) / "Documents" / "precog" / "data"
     print(f"Installing for user: {username} (uid={uid})\n")
     print("Creating system data directory:")
@@ -126,3 +125,18 @@ if __name__ == "__main__":
     create_project_data_dir(uid, gid)
     create_symlinks(uid, gid)
     verify()
+
+    if "--skip-wizard" not in sys.argv and sys.stdin.isatty():
+        try:
+            from wizard import run_wizard, apply_wizard_answers
+            answers = run_wizard()
+            conf_path = Path(__file__).parent / "config" / "precog.conf"
+            changes = apply_wizard_answers(answers, conf_path=str(conf_path))
+            print()
+            print("Configuration changes:")
+            for change in changes:
+                print(f"  - {change}")
+        except ImportError:
+            print("\n[install] wizard.py not found — skipping setup wizard.")
+    else:
+        print("\nSkipping setup wizard (--skip-wizard given, or non-interactive session).")
