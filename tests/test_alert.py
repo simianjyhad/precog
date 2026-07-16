@@ -284,6 +284,57 @@ def test_persistence():
     return all([r1, r2, r3])
 
 
+def test_dedup_prevents_double_flagging():
+    """
+    The same LogEntry (same timestamp_ns) evaluated twice under the
+    same pattern_key should only ever be flagged once — both within a
+    single tracker instance, and across a restart where the tracker
+    reloads its dedup keys from disk.
+    """
+    print("\nTest 9: Dedup prevents double-flagging")
+    tmp = Path(tempfile.mkdtemp())
+    thresholds = {
+        AlertLevel.TRIAGE: AlertThreshold(1, 1, 0),
+        AlertLevel.PATTERN_WATCH: AlertThreshold(3, 5, 600),
+        AlertLevel.CORRELATION: AlertThreshold(2, 3, 300),
+    }
+
+    # Reuse the SAME entry object (same timestamp_ns) for every call —
+    # this is what actually exercises the dedup key (timestamp_ns, pattern_key),
+    # rather than accidentally testing with two different timestamps.
+    entry = make_entry()
+
+    tracker1 = AlertTracker(thresholds=thresholds, data_dir=tmp)
+    first_flag = tracker1.evaluate(entry, AlertLevel.TRIAGE, "test:dedup_a")
+    r1 = pass_fail(first_flag is not None, "First evaluation flags normally")
+
+    second_flag = tracker1.evaluate(entry, AlertLevel.TRIAGE, "test:dedup_a")
+    r2 = pass_fail(
+        second_flag is None,
+        "Same entry re-evaluated in same run does NOT re-flag",
+    )
+    r3 = pass_fail(
+        tracker1.flagged_count() == 1,
+        "Only one flagged entry exists after the duplicate attempt",
+        f"count={tracker1.flagged_count()}"
+    )
+
+    # Restart — new tracker instance, same data dir, loads dedup keys from disk
+    tracker2 = AlertTracker(thresholds=thresholds, data_dir=tmp)
+    third_flag = tracker2.evaluate(entry, AlertLevel.TRIAGE, "test:dedup_a")
+    r4 = pass_fail(
+        third_flag is None,
+        "Same entry after restart still does NOT re-flag (dedup survives restart)",
+    )
+    r5 = pass_fail(
+        tracker2.flagged_count() == 1,
+        "Still only one flagged entry after restart",
+        f"count={tracker2.flagged_count()}"
+    )
+
+    return all([r1, r2, r3, r4, r5])
+
+
 # ---------------------------------------------------------------------------
 # Run all tests
 # ---------------------------------------------------------------------------
@@ -302,6 +353,7 @@ if __name__ == "__main__":
         test_get_flagged_filters_by_tier(),
         test_clear_flagged(),
         test_persistence(),
+        test_dedup_prevents_double_flagging(),
     ]
 
     total = len(results)
