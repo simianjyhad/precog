@@ -86,6 +86,17 @@ MIN_DAYS_FOR_FULL_CONFIDENCE = 14
 SEED_CONFIDENCE_WEIGHT = 0.40
 DIRECT_CONFIDENCE_WEIGHT = 0.60
 MONITORING_ACTIVE_THRESHOLD = 0.10
+
+# ---------------------------------------------------------------------------
+# Boot window tracking constants
+# ---------------------------------------------------------------------------
+
+MAX_BOOT_WINDOW_SECONDS = 300   # 5 minutes — entries within this many
+                                 # seconds of boot (per __MONOTONIC_TIMESTAMP)
+                                 # count as "boot window" entries
+MAX_TRACKED_BOOTS = 10          # only keep the most recent N boot sessions'
+                                 # worth of boot-window stats; older ones pruned
+
 # ---------------------------------------------------------------------------
 # TimeBucket — compact stats for one hour-of-day / day-of-week slot
 # ---------------------------------------------------------------------------
@@ -274,6 +285,16 @@ class BaselineStore:
         self._buckets:  dict[str, dict[str, TimeBucket]]  = {}
         self._keywords: dict[str, dict[str, KeywordStat]] = {}
 
+        # Boot window tracking: keyed by boot_id, holds keyword hit
+        # counts for entries seen within MAX_BOOT_WINDOW_SECONDS of
+        # that boot's start (per __MONOTONIC_TIMESTAMP). Separate from
+        # the hourly _buckets/_keywords above so boot-time chatter
+        # doesn't pollute "what's normal for this hour" stats.
+        self._boot_windows: dict[str, dict[str, KeywordStat]] = {}
+        # Insertion order of boot IDs, oldest first — used to prune
+        # down to MAX_TRACKED_BOOTS without needing timestamp parsing.
+        self._boot_order: list[str] = []
+
         self._first_seen_ns:           int   = 0
         self._direct_observation_days: float = 0.0
         self._seed_days:               float = 0.0
@@ -353,6 +374,31 @@ class BaselineStore:
 
             if self._first_seen_ns == 0 or timestamp_ns < self._first_seen_ns:
                 self._first_seen_ns = timestamp_ns
+
+    def record_boot_entry(
+        self, boot_id: str, keyword: str, timestamp_ns: int
+    ) -> None:
+        """
+        Records a keyword hit within a specific boot's window (see
+        MAX_BOOT_WINDOW_SECONDS). Separate from record_keyword_hit()'s
+        hourly-bucket tracking — this is keyed by boot_id instead, so
+        boot-time chatter doesn't get folded into "what's normal for
+        this hour" stats.
+
+        Prunes down to MAX_TRACKED_BOOTS, removing the oldest boot's
+        data first, once that limit is exceeded.
+        """
+        with self._lock:
+            if boot_id not in self._boot_windows:
+                self._boot_windows[boot_id] = {}
+                self._boot_order.append(boot_id)
+                while len(self._boot_order) > MAX_TRACKED_BOOTS:
+                    oldest = self._boot_order.pop(0)
+                    self._boot_windows.pop(oldest, None)
+
+            if keyword not in self._boot_windows[boot_id]:
+                self._boot_windows[boot_id][keyword] = KeywordStat()
+            self._boot_windows[boot_id][keyword].record_hit(timestamp_ns)
 
     def update_direct_observation(self, days: float) -> None:
         """
@@ -451,6 +497,14 @@ class BaselineStore:
                     }
                     for source, kws in self._keywords.items()
                 },
+                "boot_windows": {
+                    boot_id: {
+                        kw: stat.to_dict()
+                        for kw, stat in kws.items()
+                    }
+                    for boot_id, kws in self._boot_windows.items()
+                },
+                "boot_order": list(self._boot_order),
             }
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(data, f, separators=(",", ":"))
@@ -489,6 +543,12 @@ class BaselineStore:
                     kw: KeywordStat.from_dict(s)
                     for kw, s in kws.items()
                 }
+            for boot_id, kws in data.get("boot_windows", {}).items():
+                self._boot_windows[boot_id] = {
+                    kw: KeywordStat.from_dict(s)
+                    for kw, s in kws.items()
+                }
+            self._boot_order = data.get("boot_order", [])
 
             print(f"[precog] Baseline loaded — confidence: "
                   f"{self.confidence_pct}%, size: {self.storage_size()}")
@@ -673,6 +733,22 @@ class JournalSeeder:
                     priority=priority,
                 )
                 self.collector.process(entry)
+
+                boot_id = record.get("_BOOT_ID")
+                mono_str = record.get("__MONOTONIC_TIMESTAMP", "")
+                if boot_id:
+                    try:
+                        mono_ns = int(mono_str)
+                    except (ValueError, TypeError):
+                        mono_ns = None
+                    if (mono_ns is not None
+                            and mono_ns < MAX_BOOT_WINDOW_SECONDS * 1000000000):
+                        raw_lower = entry.raw.lower()
+                        cfg = self.store.config
+                        for keyword in cfg.active_keywords:
+                            if keyword in raw_lower and not cfg.is_excluded(keyword, raw_lower):
+                                self.store.record_boot_entry(boot_id, keyword, ts_ns)
+
                 entry_count += 1
 
                 if entry_count % 10000 == 0:
