@@ -214,6 +214,39 @@ class Precog:
 
     # --- Entry processing ------------------------------------------------
 
+    def _on_journal_record(self, record: dict, ts_ns: int) -> None:
+        """
+        Called by JournalWatcher for every live journal entry, in
+        addition to normal processing. Detects whether this entry
+        falls within the current boot's opening window (per
+        __MONOTONIC_TIMESTAMP) and, if so, records matching keyword
+        hits via BaselineStore.record_boot_entry() — mirrors the same
+        detection JournalSeeder.seed() does for historical entries.
+        """
+        from core.baseline import MAX_BOOT_WINDOW_SECONDS
+
+        boot_id = record.get("_BOOT_ID")
+        if not boot_id:
+            return
+
+        mono_str = record.get("__MONOTONIC_TIMESTAMP", "")
+        try:
+            mono_ns = int(mono_str)
+        except (ValueError, TypeError):
+            return
+
+        if mono_ns >= MAX_BOOT_WINDOW_SECONDS * 1_000_000_000:
+            return
+
+        unit = record.get("_SYSTEMD_UNIT", record.get("SYSLOG_IDENTIFIER", "unknown"))
+        message = record.get("MESSAGE", "")
+        raw_lower = f"{unit}: {message}".lower()
+
+        cfg = self.baseline_config
+        for keyword in cfg.active_keywords:
+            if keyword in raw_lower and not cfg.is_excluded(keyword, raw_lower):
+                self.baseline_store.record_boot_entry(boot_id, keyword, ts_ns)
+
     def process_entry(self, entry: LogEntry) -> None:
         """
         Called for every new log entry.
@@ -271,7 +304,7 @@ class Precog:
 
         self.first_run_check()
 
-        self.watcher_manager.add_journal_watcher()
+        self.watcher_manager.add_journal_watcher(boot_hook=self._on_journal_record)
         if Path("/var/log/auth.log").exists():
             self.watcher_manager.add_file_watcher("/var/log/auth.log")
 

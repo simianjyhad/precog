@@ -253,9 +253,19 @@ class JournalWatcher:
     Requests microsecond-precision timestamps (__REALTIME_TIMESTAMP).
     """
 
-    def __init__(self, rolling_log: RollingLog, extra_args: list[str] = None):
+    def __init__(
+        self,
+        rolling_log: RollingLog,
+        extra_args: list[str] = None,
+        boot_hook=None,
+    ):
         self.rolling_log = rolling_log
         self.extra_args = extra_args or []
+        # Optional callback: called with (record: dict, ts_ns: int) for
+        # every entry seen. Lets a caller (precog.py) do boot-window
+        # detection without rolling_log.py needing to know anything
+        # about BaselineStore. None means "no boot detection wired up."
+        self.boot_hook = boot_hook
         self._stop_event = threading.Event()
         self._thread = threading.Thread(
             target=self._watch,
@@ -322,6 +332,9 @@ class JournalWatcher:
                     ts_ns = int(ts_us_str) * 1000   # microseconds → nanoseconds
                 except (ValueError, TypeError):
                     ts_ns = time.time_ns()           # fallback to now
+
+                if self.boot_hook is not None:
+                    self.boot_hook(record, ts_ns)
 
                 priority_str = record.get("PRIORITY", "")
                 try:
@@ -447,8 +460,8 @@ class WatcherManager:
         self.rolling_log = rolling_log
         self._watchers = []
 
-    def add_journal_watcher(self, extra_args: list[str] = None) -> None:
-        self._watchers.append(JournalWatcher(self.rolling_log, extra_args))
+    def add_journal_watcher(self, extra_args: list[str] = None, boot_hook=None) -> None:
+        self._watchers.append(JournalWatcher(self.rolling_log, extra_args, boot_hook=boot_hook))
 
     def add_file_watcher(self, path: str) -> None:
         self._watchers.append(FileWatcher(self.rolling_log, path))
