@@ -162,6 +162,18 @@ class Precog:
             keyword_exclusions=keyword_exclusions,
         )
         self.baseline_store  = BaselineStore(config=self.baseline_config)
+
+        # Armed boot summary — if flag file exists, show once and clear it.
+        if _ARM_FLAG_PATH.exists():
+            with self.baseline_store._lock:
+                if self.baseline_store._boot_order:
+                    boot_id = self.baseline_store._boot_order[-1]
+                    kw_dict = self.baseline_store._boot_windows.get(boot_id, {})
+                    format_boot_summary(boot_id, kw_dict)
+                else:
+                    print("[precog] Armed boot summary: no boot window data yet.")
+            _ARM_FLAG_PATH.unlink(missing_ok=True)
+
         self.collector        = BaselineCollector(self.baseline_store)
         self.rolling_log      = RollingLog()
         self.alert_tracker    = AlertTracker(
