@@ -347,6 +347,58 @@ class Precog:
 
 
 # ---------------------------------------------------------------------------
+# Boot summary — shared formatter + --boot-summary + --arm-boot-summary
+# ---------------------------------------------------------------------------
+_ARM_FLAG_PATH = Path("/var/lib/precog/arm_boot_summary.flag")
+
+def format_boot_summary(boot_id: str, kw_dict: dict) -> None:
+    """
+    Prints the keyword hit breakdown for a single boot window.
+    Called by both show_boot_summary() and the auto-display on armed startup.
+    """
+    colors = ColorScheme()
+    print(colors.colorize(f"[precog] Boot summary for boot ID: {boot_id}", "boot_entry"))
+    if not kw_dict:
+        print(colors.colorize("  (no keyword hits recorded during boot window)", "base_system"))
+        return
+    sorted_kws = sorted(kw_dict.items(), key=lambda x: x[1].hits, reverse=True)
+    for keyword, stat in sorted_kws:
+        print(colors.colorize(f"  {keyword:<30} {stat.hits:>4} hit(s)", "base_system"))
+
+
+def show_boot_summary() -> None:
+    """
+    --boot-summary: manual on-demand view of the most recent boot's
+    keyword breakdown. Loads BaselineStore, grabs the latest boot_id
+    from _boot_order, prints via format_boot_summary(), and exits.
+    """
+    store = BaselineStore(config=BaselineConfig())
+    with store._lock:
+        if not store._boot_order:
+            print("[precog] No boot window data recorded yet.")
+            sys.exit(0)
+        boot_id = store._boot_order[-1]
+        kw_dict = store._boot_windows.get(boot_id, {})
+    format_boot_summary(boot_id, kw_dict)
+
+
+def arm_boot_summary() -> None:
+    """
+    --arm-boot-summary: writes a flag file so the NEXT manual startup
+    of precog.py automatically displays the boot summary once, then
+    clears the flag. Nothing launches itself — precog still starts
+    manually as always.
+    """
+    try:
+        _ARM_FLAG_PATH.touch()
+        print(f"[precog] Armed. Next startup will display the boot summary once.")
+    except PermissionError:
+        print(f"[precog] ERROR: cannot write flag file at {_ARM_FLAG_PATH}")
+        print("[precog] Try running with sudo, or check /var/lib/precog permissions.")
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
 # Standalone boot log viewer — does not touch baseline, alerts, or config.
 # Just runs journalctl -b, colorizes it consistently with the rest of
 # Precog's output, prints it, and exits. No monitoring is started.
@@ -389,6 +441,10 @@ def show_boot_log():
 if __name__ == "__main__":
     if "--show-boot-log" in sys.argv:
         show_boot_log()
+    elif "--boot-summary" in sys.argv:
+        show_boot_summary()
+    elif "--arm-boot-summary" in sys.argv:
+        arm_boot_summary()
     else:
         precog = Precog()
         precog.run()
