@@ -222,6 +222,16 @@ class Precog:
             print("\n" + "=" * 60)
             print(self.baseline_store.first_run_notice())
             print("=" * 60 + "\n")
+            try:
+                from wizard import run_wizard, apply_wizard_answers
+                answers = run_wizard()
+                changes = apply_wizard_answers(answers, conf_path="config/precog.conf")
+                for change in changes:
+                    print(f"[precog] {change}")
+                # Reload colors so the chosen palette takes effect immediately.
+                self.colors = ColorScheme()
+            except ImportError:
+                print("[precog] wizard.py not found — skipping setup wizard.")
             self.baseline_store.acknowledge_notice()
 
     # --- Entry processing ------------------------------------------------
