@@ -40,6 +40,7 @@ from core.baseline import (
 from core.alert import AlertTracker, AlertLevel, AlertThreshold, thresholds_from_config
 from core.colors import ColorScheme
 from core.config import PrecogConfig, ConfigError
+from core.pause import PauseController
 
 
 # ---------------------------------------------------------------------------
@@ -215,6 +216,29 @@ class Precog:
         self._stop_event = False
         self._archive_stop_event = threading.Event()
 
+        self.pause_controller = PauseController(
+            toggle_key="p", on_toggle=self._on_pause_toggle
+        )
+
+    # --- Pause/resume ----------------------------------------------------
+
+    def _on_pause_toggle(self, paused: bool) -> None:
+        """
+        Called from the pause-listener thread whenever 'p' flips the
+        paused state. While paused, new entries are still buffered
+        by the watchers (unaffected — separate thread) but the main
+        loop skips baseline collection, keyword/alert evaluation,
+        and aggregate-flush checks for anything that arrives during
+        the pause. Nothing is queued up to process on resume; the
+        point of pausing is to not let deliberate noise (an update,
+        a big rebuild) pollute the baseline or fire alerts.
+        """
+        if paused:
+            msg = "[precog] PAUSED — monitoring suspended (press 'p' to resume)"
+        else:
+            msg = "[precog] RESUMED — monitoring active (press 'p' to pause)"
+        print(self.colors.colorize(msg, "base_system"))
+
     # --- Startup -------------------------------------------------------
 
     def first_run_check(self) -> None:
@@ -309,10 +333,12 @@ class Precog:
         flagged      = self.alert_tracker.flagged_count()
         active       = "yes" if self.baseline_store.monitoring_active else "no"
 
+        paused = "yes" if self.pause_controller.is_paused() else "no"
+
         ts = time.strftime("%H:%M:%S")
         print(f"[precog] {ts} — buffer: {buffer_count} entries | "
               f"confidence: {confidence}% | monitoring active: {active} | "
-              f"flagged: {flagged}")
+              f"flagged: {flagged} | paused: {paused}")
 
     # --- Run loop ------------------------------------------------------
 
@@ -350,12 +376,19 @@ class Precog:
         self.watcher_manager.start_all()
         self.collector.start_flush_loop()
         self._start_archive_loop()
+        self.pause_controller.start()
 
-        print("[precog] Monitoring active — press Ctrl+C to stop.\n")
+        if self.pause_controller.enabled:
+            print("[precog] Monitoring active — press 'p' to pause, Ctrl+C to stop.\n")
+        else:
+            # stdin isn't an interactive tty (service, piped input, etc.)
+            # — pause toggle has no effect, so don't advertise it.
+            print("[precog] Monitoring active — press Ctrl+C to stop.\n")
 
         def shutdown(sig, frame):
             print("\n[precog] Shutting down...")
             self._archive_stop_event.set()
+            self.pause_controller.stop()
             self.watcher_manager.stop_all()
             self.collector.stop()
             # Flagged alerts are intentionally left on disk across restarts —
@@ -375,9 +408,17 @@ class Precog:
 
                 snapshot = self.rolling_log.snapshot()
                 new_entries = snapshot[last_processed_count:]
+                last_processed_count = len(snapshot)
+
+                if self.pause_controller.is_paused():
+                    # Entries during a pause are skipped, not queued —
+                    # they're marked seen (last_processed_count above)
+                    # so they don't get dumped through on resume.
+                    self.print_status()
+                    continue
+
                 for entry in new_entries:
                     self.process_entry(entry)
-                last_processed_count = len(snapshot)
 
                 for summary in self.alert_tracker.check_aggregate_flush():
                     line = (f"[precog] AGGREGATE: {summary.pattern_key} — "
