@@ -21,7 +21,7 @@ NAMED_COLORS = {
     "white":   (255, 255, 255),
 }
 
-CATEGORIES = ["base_system", "boot_entry", "tier1_pattern", "tier2_corr", "tier3_triage"]
+CATEGORIES = ["base_system", "boot_entry", "tier1_pattern", "tier2_corr", "tier3_triage", "aggregate"]
 
 
 def _hex_to_rgb(hex_str):

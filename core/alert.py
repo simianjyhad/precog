@@ -45,10 +45,18 @@ class AlertLevel(Enum):
 
     TRIAGE         — Critical system errors requiring immediate attention.
                      Lowest threshold — flags on first occurrence.
+
+    AGGREGATE      — Not a severity tier. A periodic count summary for
+                     keywords quarantined into aggregate mode (see
+                     aggregate_keywords in precog.conf). These skip
+                     PATTERN_WATCH/CORRELATION/TRIAGE evaluation entirely;
+                     this level exists only so flush summaries can reuse
+                     FlaggedEntry/flagged.log persistence and archiving.
     """
     PATTERN_WATCH = 1
     CORRELATION   = 2
     TRIAGE        = 3
+    AGGREGATE     = 4
 
 
 # ---------------------------------------------------------------------------
@@ -264,6 +272,7 @@ class AlertTracker:
         self,
         thresholds: dict[AlertLevel, AlertThreshold] = None,
         data_dir: Path = None,
+        aggregate_keywords: dict[str, int] = None,
     ):
         self.thresholds = thresholds or DEFAULT_THRESHOLDS
         self.data_dir = data_dir or (Path(__file__).parent.parent / "data")
@@ -277,6 +286,18 @@ class AlertTracker:
 
         # Ordered list of all flagged entries, newest last
         self._flagged: list[FlaggedEntry] = []
+
+        # keyword (lowercased) -> flush interval in seconds, from
+        # cfg.aggregate_keywords. Empty dict if the section is unused.
+        self._aggregate_keywords: dict[str, int] = aggregate_keywords or {}
+        # keyword -> hits recorded since the last flush
+        self._aggregate_counts: dict[str, int] = defaultdict(int)
+        # keyword -> ns timestamp of last flush. Seeded at startup rather
+        # than left unset, so the first flush is a full interval away
+        # instead of firing immediately on the first hit after restart.
+        self._aggregate_last_flush: dict[str, int] = {
+            kw: time.time_ns() for kw in self._aggregate_keywords
+        }
 
         # Ensure data dir exists and load previous flags from disk.
         # Explicit chmod here (not just relying on install.py) so
@@ -366,6 +387,71 @@ class AlertTracker:
             self._append_to_disk(flagged)
 
             return flagged
+
+    def record_aggregate_hit(self, keyword: str) -> None:
+        """
+        Record one hit for a keyword quarantined into aggregate mode.
+
+        This bypasses PatternWindow/threshold evaluation entirely — no
+        PATTERN_WATCH/CORRELATION/TRIAGE exposure, just a silent count.
+        The caller (precog.py's dispatch logic) is responsible for
+        checking cfg.aggregate_keywords first and calling this instead
+        of evaluate() when a line matches a quarantined keyword.
+        """
+        with self._lock:
+            self._aggregate_counts[keyword] += 1
+
+    def check_aggregate_flush(self, now_ns: int = None) -> list[FlaggedEntry]:
+        """
+        Check every configured aggregate keyword and flush any whose
+        interval has elapsed. Meant to be called once per tick from the
+        main loop (check-on-tick, not a background timer thread).
+
+        A keyword's clock resets on every check, whether or not it had
+        hits — a quiet interval doesn't leave a partial-interval carry
+        into the next window. Nothing is written to flagged.log when
+        the count is zero, so quiet periods don't spam the file.
+
+        Returns the list of FlaggedEntry summaries flushed this call
+        (usually empty) so the caller can print/color them live.
+        """
+        if not self._aggregate_keywords:
+            return []
+
+        now_ns = now_ns if now_ns is not None else time.time_ns()
+        flushed: list[FlaggedEntry] = []
+
+        with self._lock:
+            for keyword, interval_seconds in self._aggregate_keywords.items():
+                last_flush = self._aggregate_last_flush.get(keyword, now_ns)
+                if now_ns - last_flush < interval_seconds * 1_000_000_000:
+                    continue
+
+                count = self._aggregate_counts.get(keyword, 0)
+                self._aggregate_last_flush[keyword] = now_ns
+                self._aggregate_counts[keyword] = 0
+
+                if count == 0:
+                    continue
+
+                summary = FlaggedEntry(
+                    entry=LogEntry(
+                        timestamp_ns=now_ns,
+                        source="aggregate",
+                        raw=keyword,
+                    ),
+                    level=AlertLevel.AGGREGATE,
+                    flagged_at=now_ns,
+                    pattern_key=f"aggregate:{keyword}",
+                    hit_count=count,
+                    note=f"{count} hits aggregated over the last "
+                         f"{interval_seconds}s (quarantined keyword)",
+                )
+                self._flagged.append(summary)
+                self._append_to_disk(summary)
+                flushed.append(summary)
+
+        return flushed
 
     def get_flagged(
         self,

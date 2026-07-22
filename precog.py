@@ -177,11 +177,19 @@ class Precog:
         self.collector        = BaselineCollector(self.baseline_store)
         self.rolling_log      = RollingLog()
         self.alert_tracker    = AlertTracker(
-            thresholds=thresholds, data_dir=Path("/var/lib/precog")
+            thresholds=thresholds,
+            data_dir=Path("/var/lib/precog"),
+            aggregate_keywords=(
+                self.config.aggregate_keywords if self.config is not None else {}
+            ),
         )
         noisy_keywords = (
             self.config.noisy_keywords if self.config is not None else {}
         )
+        self.aggregate_keywords = (
+            self.config.aggregate_keywords if self.config is not None else {}
+        )
+        self.colors           = ColorScheme()
         self.alert_bridge     = AlertBridge(
             self.alert_tracker,
             critical_keywords=critical_keywords,
@@ -284,6 +292,15 @@ class Precog:
         for keyword in matched_keywords:
             self.alert_bridge.consider(entry, keyword)
 
+        # Aggregate keywords are matched independently of active_keywords —
+        # that's the whole point of quarantining a keyword this way: it
+        # was never in [keywords] watched/critical to begin with (that's
+        # why it slipped past tier processing in the first place). Skips
+        # AlertBridge/tier evaluation entirely; just a silent count bump.
+        for keyword in self.aggregate_keywords:
+            if keyword in raw_lower:
+                self.alert_tracker.record_aggregate_hit(keyword)
+
     # --- Status reporting --------------------------------------------------
 
     def print_status(self) -> None:
@@ -361,6 +378,11 @@ class Precog:
                 for entry in new_entries:
                     self.process_entry(entry)
                 last_processed_count = len(snapshot)
+
+                for summary in self.alert_tracker.check_aggregate_flush():
+                    line = (f"[precog] AGGREGATE: {summary.pattern_key} — "
+                            f"{summary.note}")
+                    print(self.colors.colorize(line, "aggregate"))
 
                 self.print_status()
 

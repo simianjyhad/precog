@@ -62,6 +62,7 @@ class PrecogConfig:
         self.retention = self._load_retention(parser)
         self.keyword_exclusions = self._load_keyword_exclusions(parser)
         self.noisy_keywords = self._load_noisy_keywords(parser)
+        self.aggregate_keywords = self._load_aggregate_keywords(parser)
 
     # ------------------------------------------------------------------
     def _load_thresholds(self, parser):
@@ -223,6 +224,41 @@ class PrecogConfig:
                     f"[noisy_keywords] {key} values must be integers, got: {raw!r}"
                 )
             result[key.strip().lower()] = (count, window)
+        return result
+
+    # ------------------------------------------------------------------
+    def _load_aggregate_keywords(self, parser):
+        """
+        Optional section — falls back to an empty dict if missing.
+        Maps a keyword to a flush interval in seconds. Keywords listed
+        here skip normal tier processing entirely and are instead
+        silently counted, then flushed as a single periodic summary
+        entry once their interval elapses. Intended as a quarantine
+        for a keyword that fires far too often to alert on per-hit
+        (e.g. a known upstream bug spamming the log), without needing
+        a bigger noisy_keywords threshold. Format in precog.conf:
+        keyword = flush_interval_seconds
+        """
+        if "aggregate_keywords" not in parser:
+            return {}
+
+        section = parser["aggregate_keywords"]
+        result = {}
+        for key in section:
+            raw = section[key].strip()
+            try:
+                interval = int(raw)
+            except ValueError:
+                raise ConfigError(
+                    f"[aggregate_keywords] {key} must be an integer "
+                    f"(flush interval in seconds), got: {raw!r}"
+                )
+            if interval <= 0:
+                raise ConfigError(
+                    f"[aggregate_keywords] {key} flush interval must be "
+                    f"positive, got: {interval}"
+                )
+            result[key.strip().lower()] = interval
         return result
 
     # ------------------------------------------------------------------
